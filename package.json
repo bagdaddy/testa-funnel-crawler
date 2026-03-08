@@ -1,0 +1,20 @@
+{
+  "name": "quiz-funnel-screenshot-crawler",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Apify actor that crawls ecommerce quiz funnels, screenshots every step, and maps all paths",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "apify": "^3",
+    "crawlee": "^3",
+    "playwright": "^1"
+  },
+  "license": "ISC"
+}

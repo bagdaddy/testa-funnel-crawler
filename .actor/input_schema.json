@@ -1,0 +1,56 @@
+{
+  "title": "Quiz Funnel Screenshot Crawler",
+  "description": "Crawls ecommerce quiz funnels by clicking through all options, screenshotting every step, and mapping all possible paths.",
+  "type": "object",
+  "schemaVersion": 1,
+  "required": ["startUrl"],
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "The first page of the quiz funnel",
+      "editor": "textfield",
+      "prefill": "https://example.com/quiz"
+    },
+    "maxDepth": {
+      "title": "Max Depth",
+      "type": "integer",
+      "description": "Maximum number of click steps before stopping a path",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "maxBranches": {
+      "title": "Max Branches",
+      "type": "integer",
+      "description": "Maximum number of clickable options to follow per page",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 20
+    },
+    "waitAfterClick": {
+      "title": "Wait After Click (ms)",
+      "type": "integer",
+      "description": "Milliseconds to wait after each click before screenshotting",
+      "default": 1000,
+      "minimum": 100,
+      "maximum": 10000
+    },
+    "viewportWidth": {
+      "title": "Viewport Width",
+      "type": "integer",
+      "description": "Browser viewport width in pixels (default: mobile)",
+      "default": 390,
+      "minimum": 320,
+      "maximum": 1920
+    },
+    "viewportHeight": {
+      "title": "Viewport Height",
+      "type": "integer",
+      "description": "Browser viewport height in pixels (default: mobile)",
+      "default": 844,
+      "minimum": 480,
+      "maximum": 1080
+    }
+  }
+}

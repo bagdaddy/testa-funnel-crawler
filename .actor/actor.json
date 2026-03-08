@@ -1,0 +1,14 @@
+{
+  "actorSpecification": 1,
+  "name": "quiz-funnel-screenshot-crawler",
+  "version": "1.0.0",
+  "buildTag": "latest",
+  "environmentVariables": {},
+  "dockerfile": "../Dockerfile",
+  "input": "./input_schema.json",
+  "defaultRunOptions": {
+    "build": "latest",
+    "memoryMbytes": 4096,
+    "timeoutSecs": 3600
+  }
+}
