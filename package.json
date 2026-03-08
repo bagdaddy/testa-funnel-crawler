@@ -12,6 +12,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39",
     "apify": "^3",
     "crawlee": "^3",
     "playwright": "^1"

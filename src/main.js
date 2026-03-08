@@ -1,283 +1,66 @@
 import { Actor } from 'apify';
 import { PlaywrightCrawler } from 'crawlee';
-import crypto from 'node:crypto';
+import {
+  validateStartUrl,
+  dismissPopups,
+  extractPageSnapshot,
+  hashPageContent,
+  fillForm,
+  waitForSettle,
+  fingerprintActions,
+  takeScreenshot,
+} from './page-utils.js';
+import { initLlmClient, analyzePage } from './llm.js';
 
 // ---------------------------------------------------------------------------
-// Constants
+// Action Execution
 // ---------------------------------------------------------------------------
 
-const EXCLUDED_LABELS = [
-  /privacy\s*policy/i,
-  /terms\s*of\s*(service|use)/i,
-  /cookie\s*policy/i,
-  /refund\s*policy/i,
-  /contact\s*us/i,
-  /about\s*us/i,
-  /\bfaq\b/i,
-  /sign\s*up/i,
-  /\blog\s*in\b/i,
-  /\blogin\b/i,
-  /\bregister\b/i,
-  /\bunsubscribe\b/i,
-  /\baccessibility\b/i,
-  /\bsitemap\b/i,
-  /\bcareers\b/i,
-  /\bpress\b/i,
-  /\bblog\b/i,
-];
-
-const EXCLUDED_HREFS = [
-  'privacy', 'terms', 'cookie', 'refund',
-  'contact', 'about', 'faq', 'login',
-  'signup', 'register', 'sitemap',
-];
-
-const NAV_LABELS = [
-  /^next$/i,
-  /^continue$/i,
-  /^get\s*started$/i,
-  /^proceed$/i,
-  /^see\s*my\s*results$/i,
-  /^show\s*results$/i,
-  /^submit$/i,
-  /^start$/i,
-  /^begin$/i,
-  /^go$/i,
-  /^confirm$/i,
-];
-
-const END_OF_FUNNEL_SIGNALS = [
-  /\$\d/,
-  /\u20AC\d/,   // €
-  /\u00A3\d/,   // £
-  /\/month/i,
-  /\/year/i,
-  /\bcheckout\b/i,
-  /\badd\s*to\s*cart\b/i,
-  /\bbuy\s*now\b/i,
-];
-
-const POPUP_CLOSE_SELECTORS = [
-  '[aria-label="close"]',
-  '[aria-label="Close"]',
-  'button.close',
-  '#close',
-  '[class*="dismiss"]',
-  '[class*="close-button"]',
-  '[class*="closeButton"]',
-  '[class*="cookie"] button',
-  '[class*="banner"] button',
-];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function fingerprintPath(path) {
-  const key = path.map((s) => `${s.label}::${s.index}`).join('|');
-  return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
-}
-
-function isExcluded(label, href) {
-  const trimmed = label.trim();
-  if (EXCLUDED_LABELS.some((re) => re.test(trimmed))) return true;
-  if (href && EXCLUDED_HREFS.some((h) => href.toLowerCase().includes(h))) return true;
-  return false;
-}
-
-function isNavButton(label) {
-  return NAV_LABELS.some((re) => re.test(label.trim()));
-}
-
-function hasEndOfFunnelSignals(text) {
-  return END_OF_FUNNEL_SIGNALS.some((re) => re.test(text));
-}
-
-function validateStartUrl(startUrl) {
-  if (!startUrl) {
-    throw new Error('Missing required input: startUrl');
-  }
+async function executeAction(page, action, waitAfterClick) {
   try {
-    const parsed = new URL(startUrl);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      throw new Error('startUrl must use http or https protocol');
-    }
-    return parsed.hostname;
-  } catch (err) {
-    throw new Error(`Invalid startUrl "${startUrl}": ${err.message}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Popup Dismissal
-// ---------------------------------------------------------------------------
-
-async function dismissPopups(page) {
-  for (const selector of POPUP_CLOSE_SELECTORS) {
-    try {
-      const el = page.locator(selector).first();
-      if (await el.isVisible({ timeout: 500 })) {
-        await el.click({ timeout: 1000 });
-        await page.waitForTimeout(300);
-      }
-    } catch {
-      // ignore — popup element not present or not clickable
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Button Detection
-// ---------------------------------------------------------------------------
-
-const BUTTON_DETECT_TIMEOUT_MS = 10_000;
-
-async function detectButtons(page, startDomain, maxBranches) {
-  const selectors = [
-    'button:visible',
-    '[role="button"]:visible',
-    'input[type="button"]:visible',
-    'input[type="submit"]:visible',
-    'a[href]:visible',
-    'label:visible',
-  ];
-
-  const seen = new Set();
-  const buttons = [];
-  const startTime = Date.now();
-
-  for (const selector of selectors) {
-    if (buttons.length >= maxBranches) break;
-    if (Date.now() - startTime > BUTTON_DETECT_TIMEOUT_MS) break;
-
-    const elements = page.locator(selector);
-    const count = await elements.count();
-
-    for (let i = 0; i < count && buttons.length < maxBranches; i++) {
-      if (Date.now() - startTime > BUTTON_DETECT_TIMEOUT_MS) break;
-
-      const el = elements.nth(i);
-
-      try {
-        const isVisible = await el.isVisible().catch(() => false);
-        if (!isVisible) continue;
-
-        const box = await el.boundingBox().catch(() => null);
-        if (!box || box.width === 0 || box.height === 0) continue;
-
-        const label = (
-          (await el.innerText().catch(() => '')) ||
-          (await el.getAttribute('aria-label').catch(() => '')) ||
-          (await el.getAttribute('value').catch(() => '')) ||
-          ''
-        ).trim();
-
-        if (!label) continue;
-        if (seen.has(label)) continue;
-
-        const href = await el.getAttribute('href').catch(() => null);
-
-        // Filter links by domain
-        if (href) {
-          try {
-            const absoluteUrl = new URL(href, page.url());
-            if (!['http:', 'https:'].includes(absoluteUrl.protocol) && !href.startsWith('#') && !href.startsWith('/') && !href.startsWith('?')) {
-              continue;
-            }
-            if (['http:', 'https:'].includes(absoluteUrl.protocol) && absoluteUrl.hostname !== startDomain) {
-              continue;
-            }
-          } catch {
-            continue;
-          }
-        }
-
-        if (isExcluded(label, href)) continue;
-
-        seen.add(label);
-        buttons.push({ label, index: i, selector });
-      } catch {
-        // element became stale, skip
-      }
-    }
-  }
-
-  return buttons;
-}
-
-// ---------------------------------------------------------------------------
-// Click Replay
-// ---------------------------------------------------------------------------
-
-async function replayClicks(page, startUrl, path, waitAfterClick, log) {
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForTimeout(1000);
-  await dismissPopups(page);
-
-  for (const step of path) {
-    try {
-      const elements = page.locator(step.selector);
-      const el = elements.nth(step.index);
-
+    if (action.type === 'click') {
+      const el = page.locator(action.selector).first();
       await el.waitFor({ state: 'visible', timeout: 5000 });
       await el.click({ timeout: 5000 });
-
-      // Wait for navigation or DOM settle
-      await Promise.race([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: waitAfterClick + 2000 }).catch(() => {}),
-        page.waitForTimeout(waitAfterClick),
-      ]);
-    } catch (err) {
-      log.warning(`Replay failed at step "${step.label}" (index ${step.index}): ${err.message}`);
-      return false;
+      await waitForSettle(page, waitAfterClick + 2000);
+      return true;
     }
-  }
 
-  return true;
+    if (action.type === 'fill_and_submit') {
+      await fillForm(page, action.formFields || []);
+      if (action.submitSelector) {
+        const submitEl = page.locator(action.submitSelector).first();
+        await submitEl.click({ timeout: 5000 });
+        await waitForSettle(page, waitAfterClick + 2000);
+      }
+      return true;
+    }
+
+    return false;
+  } catch (err) {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Screenshot Helpers
+// Record Pushing
 // ---------------------------------------------------------------------------
 
-const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024; // 10 MB
-const INITIAL_JPEG_QUALITY = 85;
-const MIN_JPEG_QUALITY = 30;
-const QUALITY_STEP = 15;
-
-async function takeScreenshot(page, kvStore, depth, path) {
-  const timestamp = Date.now();
-  const pathHash = fingerprintPath(path);
-  const key = `screenshot_depth${depth}_${pathHash}_${timestamp}`;
-
-  let quality = INITIAL_JPEG_QUALITY;
-  let buffer = await page.screenshot({ fullPage: true, type: 'jpeg', quality });
-
-  while (buffer.length > MAX_SCREENSHOT_BYTES && quality > MIN_JPEG_QUALITY) {
-    quality -= QUALITY_STEP;
-    buffer = await page.screenshot({ fullPage: true, type: 'jpeg', quality });
-  }
-
-  await kvStore.setValue(key, buffer, { contentType: 'image/jpeg' });
-
-  const storeId = kvStore.id || process.env.APIFY_DEFAULT_KEY_VALUE_STORE_ID || 'default';
-  const screenshotUrl = `https://api.apify.com/v2/key-value-stores/${storeId}/records/${key}`;
-  return screenshotUrl;
-}
-
-async function pushRecord(page, path, depth, screenshotUrl, isEndOfFunnel) {
+async function pushRecord(page, actions, depth, screenshotUrl, isEndOfFunnel, pageType, llmReasoning) {
   const pageTitle = await page.title().catch(() => '');
   const url = page.url();
-  const pathString = path.map((s) => s.label).join(' > ');
+  const pathString = actions.map((a) => a.label).join(' > ');
 
   await Actor.pushData({
     screenshotUrl,
-    path,
+    actions,
     pathString,
     depth,
     pageTitle,
     url,
     isEndOfFunnel,
+    pageType,
+    llmReasoning,
     timestamp: new Date().toISOString(),
   });
 }
@@ -297,17 +80,24 @@ try {
     waitAfterClick = 1000,
     viewportWidth = 390,
     viewportHeight = 844,
+    anthropicApiKey,
   } = input;
+
+  const apiKey = anthropicApiKey || process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error('Missing Anthropic API key. Provide anthropicApiKey in input or set ANTHROPIC_API_KEY env var.');
+  }
 
   const startDomain = validateStartUrl(startUrl);
   const kvStore = await Actor.openKeyValueStore();
+  initLlmClient(apiKey);
 
   const crawler = new PlaywrightCrawler({
     maxConcurrency: 1,
     maxRequestRetries: 1,
     maxRequestsPerCrawl: 1000,
     navigationTimeoutSecs: 30,
-    requestHandlerTimeoutSecs: 120,
+    requestHandlerTimeoutSecs: 180,
     headless: true,
     launchContext: {
       launchOptions: {
@@ -316,130 +106,192 @@ try {
     },
 
     async requestHandler({ page, request, log }) {
-      const { path = [], depth = 0 } = request.userData;
+      const { actions = [], depth = 0 } = request.userData;
 
       await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
 
-      // Replay clicks to reach the current state
-      if (path.length > 0) {
-        const success = await replayClicks(page, startUrl, path, waitAfterClick, log);
+      // Navigate to start URL
+      await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForTimeout(1000);
+      await dismissPopups(page);
+
+      // Replay all actions in path
+      for (const action of actions) {
+        const success = await executeAction(page, action, waitAfterClick);
         if (!success) {
-          log.warning(`Skipping state — replay failed for path: ${path.map((s) => s.label).join(' > ')}`);
+          log.warning(`Replay failed at action "${action.label}" — skipping state`);
           return;
         }
-      } else {
-        await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-        await page.waitForTimeout(1000);
-        await dismissPopups(page);
       }
 
-      // Screenshot current state
-      let screenshotUrl;
-      try {
-        screenshotUrl = await takeScreenshot(page, kvStore, depth, path);
-      } catch (err) {
-        log.error(`Screenshot failed at depth ${depth}: ${err.message}`);
-        screenshotUrl = null;
-      }
+      // LLM analysis loop
+      const MAX_ITERATIONS = 10;
+      const seenHashes = new Set();
+      let screenshotted = false;
 
-      // Advance through nav buttons (Next/Continue) to reach the next
-      // decision point. This handles two common quiz patterns:
-      //   a) Page has ONLY nav buttons (no choices) — e.g. a "Get Started" splash
-      //   b) A choice was just replayed and a "Next" button appeared alongside
-      //      the still-visible choice buttons — click Next to advance past them
-      let navLoopCount = 0;
-      const maxNavLoops = 10;
-      const seenNavUrls = new Set();
-      let advancedViaNav = true;
-
-      while (advancedViaNav && navLoopCount < maxNavLoops) {
-        advancedViaNav = false;
-
-        let buttons = await detectButtons(page, startDomain, maxBranches);
-        const navButtons = buttons.filter((b) => isNavButton(b.label));
-
-        if (navButtons.length === 0) break;
-
-        const currentUrl = page.url();
-        if (seenNavUrls.has(currentUrl) && navLoopCount > 0) {
-          log.warning('Detected navigation cycle, stopping auto-click');
+      for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+        // Check for cycles
+        const currentHash = await hashPageContent(page);
+        if (seenHashes.has(currentHash)) {
+          log.info('Detected content cycle, stopping analysis loop');
           break;
         }
-        seenNavUrls.add(currentUrl);
+        seenHashes.add(currentHash);
 
-        const nav = navButtons[0];
-        log.info(`Auto-clicking nav button: "${nav.label}"`);
+        // Extract snapshot and analyze with LLM
+        const snapshot = await extractPageSnapshot(page);
+        const analysis = await analyzePage(snapshot, page.url(), startUrl, depth, maxDepth);
+        log.info(`LLM analysis [depth=${depth}, iter=${iteration}]: ${analysis.pageType} — ${analysis.reasoning}`);
 
-        try {
-          const el = page.locator(nav.selector).nth(nav.index);
-          await el.click({ timeout: 5000 });
-          await Promise.race([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: waitAfterClick + 2000 }).catch(() => {}),
-            page.waitForTimeout(waitAfterClick),
-          ]);
-
-          // Screenshot after nav click
+        // --- end_of_funnel ---
+        if (analysis.isEndOfFunnel || analysis.pageType === 'end_of_funnel') {
+          let screenshotUrl = null;
           try {
-            screenshotUrl = await takeScreenshot(page, kvStore, depth, [...path, { label: nav.label, index: nav.index }]);
+            screenshotUrl = await takeScreenshot(page, kvStore, depth, actions);
           } catch (err) {
-            log.error(`Nav screenshot failed: ${err.message}`);
+            log.error(`Screenshot failed: ${err.message}`);
+          }
+          await pushRecord(page, actions, depth, screenshotUrl, true, analysis.pageType, analysis.reasoning);
+          screenshotted = true;
+          return;
+        }
+
+        // --- form ---
+        if (analysis.pageType === 'form') {
+          const hashBefore = currentHash;
+
+          const formAction = {
+            type: 'fill_and_submit',
+            formFields: analysis.formFields,
+            submitSelector: analysis.submitSelector,
+            label: 'Form submission',
+          };
+          const success = await executeAction(page, formAction, waitAfterClick);
+
+          if (success) {
+            const hashAfter = await hashPageContent(page);
+            if (hashBefore !== hashAfter) {
+              let screenshotUrl = null;
+              try {
+                screenshotUrl = await takeScreenshot(page, kvStore, depth, actions);
+              } catch (err) {
+                log.error(`Screenshot failed: ${err.message}`);
+              }
+              await pushRecord(page, actions, depth, screenshotUrl, false, analysis.pageType, analysis.reasoning);
+              screenshotted = true;
+              // Continue analyzing the new page state
+              continue;
+            }
+          }
+          log.warning('Form submission did not change page content');
+          break;
+        }
+
+        // --- navigation ---
+        if (analysis.pageType === 'navigation') {
+          const navBtn = (analysis.navButtons || [])[0];
+          if (!navBtn) {
+            log.warning('Navigation type but no nav buttons found');
+            break;
           }
 
-          advancedViaNav = true;
-          navLoopCount++;
-        } catch (err) {
-          log.warning(`Nav button click failed: ${err.message}`);
+          const hashBefore = currentHash;
+          const navAction = { type: 'click', selector: navBtn.selector, label: navBtn.label };
+          const success = await executeAction(page, navAction, waitAfterClick);
+
+          if (success) {
+            const hashAfter = await hashPageContent(page);
+            if (hashBefore !== hashAfter) {
+              let screenshotUrl = null;
+              try {
+                screenshotUrl = await takeScreenshot(page, kvStore, depth, actions);
+              } catch (err) {
+                log.error(`Screenshot failed: ${err.message}`);
+              }
+              await pushRecord(page, actions, depth, screenshotUrl, false, analysis.pageType, analysis.reasoning);
+              screenshotted = true;
+              // Continue analyzing the new page state
+              continue;
+            }
+          }
+          log.warning('Navigation click did not change page content');
           break;
         }
-      }
 
-      // Now detect the actual choice buttons at this decision point
-      let buttons = await detectButtons(page, startDomain, maxBranches);
-      let choiceButtons = buttons.filter((b) => !isNavButton(b.label));
+        // --- quiz_choices ---
+        if (analysis.pageType === 'quiz_choices') {
+          const choices = (analysis.quizChoices || []).slice(0, maxBranches);
+          if (choices.length === 0) {
+            log.warning('Quiz choices type but no choices found');
+            break;
+          }
 
-      // Check end-of-funnel
-      const bodyText = await page.locator('body').innerText().catch(() => '');
-      const maxDepthReached = depth >= maxDepth;
-      const hasPricing = hasEndOfFunnelSignals(bodyText);
-      const noMoreChoices = choiceButtons.length === 0;
-      const isEndOfFunnel = maxDepthReached || (noMoreChoices && hasPricing) || (noMoreChoices && depth > 0);
+          // Screenshot the question page
+          let screenshotUrl = null;
+          try {
+            screenshotUrl = await takeScreenshot(page, kvStore, depth, actions);
+          } catch (err) {
+            log.error(`Screenshot failed: ${err.message}`);
+          }
+          await pushRecord(page, actions, depth, screenshotUrl, false, analysis.pageType, analysis.reasoning);
+          screenshotted = true;
 
-      // Push record for this state
-      await pushRecord(page, path, depth, screenshotUrl, isEndOfFunnel);
+          // Enqueue child states for each choice
+          if (depth < maxDepth) {
+            for (const choice of choices) {
+              const childAction = { type: 'click', selector: choice.selector, label: choice.label };
+              const childActions = [...actions, childAction];
+              const uniqueKey = fingerprintActions(childActions);
 
-      // Enqueue child states for each choice button
-      if (!isEndOfFunnel && depth < maxDepth) {
-        for (const button of choiceButtons) {
-          const childPath = [...path, { label: button.label, index: button.index, selector: button.selector }];
-          const uniqueKey = fingerprintPath(childPath);
-
-          await crawler.addRequests([{
-            url: startUrl,
-            uniqueKey,
-            userData: {
-              path: childPath,
-              depth: depth + 1,
-            },
-          }]);
+              await crawler.addRequests([{
+                url: startUrl,
+                uniqueKey,
+                userData: {
+                  actions: childActions,
+                  depth: depth + 1,
+                },
+              }]);
+            }
+          }
+          return;
         }
+
+        // --- other ---
+        // Not a funnel page — screenshot and stop
+        let screenshotUrl = null;
+        try {
+          screenshotUrl = await takeScreenshot(page, kvStore, depth, actions);
+        } catch (err) {
+          log.error(`Screenshot failed: ${err.message}`);
+        }
+        await pushRecord(page, actions, depth, screenshotUrl, false, analysis.pageType, analysis.reasoning);
+        screenshotted = true;
+        return;
       }
 
-      if (isEndOfFunnel) {
-        log.info(`End of funnel at depth ${depth}: ${path.map((s) => s.label).join(' > ') || '(start)'}`);
+      // Screenshot final state if not already captured
+      if (!screenshotted) {
+        let screenshotUrl = null;
+        try {
+          screenshotUrl = await takeScreenshot(page, kvStore, depth, actions);
+        } catch (err) {
+          log.error(`Screenshot failed: ${err.message}`);
+        }
+        await pushRecord(page, actions, depth, screenshotUrl, false, 'unknown', 'Loop exhausted without classification');
       }
     },
 
     async failedRequestHandler({ request, log }) {
-      const { path = [] } = request.userData;
-      log.error(`Request failed: ${path.map((s) => s.label).join(' > ') || '(start)'}`);
+      const { actions = [] } = request.userData;
+      log.error(`Request failed: ${actions.map((a) => a.label).join(' > ') || '(start)'}`);
     },
   });
 
   // Seed the initial state
   await crawler.addRequests([{
     url: startUrl,
-    uniqueKey: fingerprintPath([]),
-    userData: { path: [], depth: 0 },
+    uniqueKey: fingerprintActions([]),
+    userData: { actions: [], depth: 0 },
   }]);
 
   await crawler.run();

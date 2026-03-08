@@ -51,6 +51,13 @@
       "default": 844,
       "minimum": 480,
       "maximum": 1080
+    },
+    "anthropicApiKey": {
+      "title": "Anthropic API Key",
+      "type": "string",
+      "description": "API key for Claude LLM analysis. Can also be set as ANTHROPIC_API_KEY env var.",
+      "editor": "textfield",
+      "isSecret": true
     }
   }
 }
