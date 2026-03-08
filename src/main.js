@@ -342,26 +342,30 @@ try {
         screenshotUrl = null;
       }
 
-      // Detect buttons
-      let buttons = await detectButtons(page, startDomain, maxBranches);
-
-      // Separate nav buttons from choice buttons
-      let navButtons = buttons.filter((b) => isNavButton(b.label));
-      let choiceButtons = buttons.filter((b) => !isNavButton(b.label));
-
-      // Auto-click nav buttons if no choice buttons are present
+      // Advance through nav buttons (Next/Continue) to reach the next
+      // decision point. This handles two common quiz patterns:
+      //   a) Page has ONLY nav buttons (no choices) — e.g. a "Get Started" splash
+      //   b) A choice was just replayed and a "Next" button appeared alongside
+      //      the still-visible choice buttons — click Next to advance past them
       let navLoopCount = 0;
       const maxNavLoops = 10;
       const seenNavUrls = new Set();
+      let advancedViaNav = true;
 
-      while (navButtons.length > 0 && choiceButtons.length === 0 && navLoopCount < maxNavLoops) {
+      while (advancedViaNav && navLoopCount < maxNavLoops) {
+        advancedViaNav = false;
+
+        let buttons = await detectButtons(page, startDomain, maxBranches);
+        const navButtons = buttons.filter((b) => isNavButton(b.label));
+
+        if (navButtons.length === 0) break;
+
         const currentUrl = page.url();
-        if (seenNavUrls.has(currentUrl)) {
+        if (seenNavUrls.has(currentUrl) && navLoopCount > 0) {
           log.warning('Detected navigation cycle, stopping auto-click');
           break;
         }
         seenNavUrls.add(currentUrl);
-        navLoopCount++;
 
         const nav = navButtons[0];
         log.info(`Auto-clicking nav button: "${nav.label}"`);
@@ -381,15 +385,17 @@ try {
             log.error(`Nav screenshot failed: ${err.message}`);
           }
 
-          // Re-detect buttons
-          buttons = await detectButtons(page, startDomain, maxBranches);
-          navButtons = buttons.filter((b) => isNavButton(b.label));
-          choiceButtons = buttons.filter((b) => !isNavButton(b.label));
+          advancedViaNav = true;
+          navLoopCount++;
         } catch (err) {
           log.warning(`Nav button click failed: ${err.message}`);
           break;
         }
       }
+
+      // Now detect the actual choice buttons at this decision point
+      let buttons = await detectButtons(page, startDomain, maxBranches);
+      let choiceButtons = buttons.filter((b) => !isNavButton(b.label));
 
       // Check end-of-funnel
       const bodyText = await page.locator('body').innerText().catch(() => '');
