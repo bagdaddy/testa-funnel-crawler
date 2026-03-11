@@ -1,7 +1,7 @@
 {
   "actorSpecification": 1,
   "name": "quiz-funnel-screenshot-crawler",
-  "version": "1.0.0",
+  "version": "1.0",
   "buildTag": "latest",
   "environmentVariables": {},
   "dockerfile": "../Dockerfile",

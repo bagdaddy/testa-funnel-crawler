@@ -349,7 +349,58 @@ export function fingerprintActions(actions) {
   return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
+/**
+ * Scroll through the entire page to trigger IntersectionObserver-based
+ * animations, lazy-loaded images, and scroll-reveal effects (Framer,
+ * Webflow, AOS, etc.), then force all CSS animations/transitions to
+ * their final state so the full-page screenshot captures everything.
+ */
+async function prepareForScreenshot(page) {
+  // 1. Scroll incrementally through the page to trigger observers
+  await page.evaluate(async () => {
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+    const step = Math.max(200, Math.floor(window.innerHeight * 0.7));
+    const maxScroll = document.body.scrollHeight;
+    for (let y = 0; y < maxScroll; y += step) {
+      window.scrollTo(0, y);
+      await delay(100);
+    }
+    // Scroll to very bottom to trigger any remaining observers
+    window.scrollTo(0, maxScroll);
+    await delay(200);
+    // Scroll back to top for a clean screenshot
+    window.scrollTo(0, 0);
+    await delay(100);
+  });
+
+  // 2. Force-finish all CSS animations/transitions
+  await page.addStyleTag({
+    content: `
+      *, *::before, *::after {
+        animation-delay: 0s !important;
+        animation-duration: 0s !important;
+        animation-play-state: paused !important;
+        transition-delay: 0s !important;
+        transition-duration: 0s !important;
+      }
+    `,
+  });
+
+  // 3. Force visibility on common animation-hidden elements
+  await page.evaluate(() => {
+    const els = document.querySelectorAll('[style*="opacity: 0"], [style*="opacity:0"]');
+    for (const el of els) {
+      el.style.opacity = '1';
+    }
+  });
+
+  // Let the forced styles take effect
+  await page.waitForTimeout(300);
+}
+
 export async function takeScreenshot(page, kvStore, depth, actions) {
+  await prepareForScreenshot(page);
+
   const timestamp = Date.now();
   const pathHash = fingerprintActions(actions);
   const key = `screenshot_depth${depth}_${pathHash}_${timestamp}`;
