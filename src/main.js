@@ -768,9 +768,10 @@ try {
         }
 
         // --- other ---
-        // If this is an LLM failure, try blind clicking before giving up
-        if (isLlmFailure(analysis)) {
-          log.info('LLM failed — attempting blind click fallback');
+        // At depth 0 (landing page) or on LLM failure, try blind clicking before giving up
+        if (isLlmFailure(analysis) || depth === 0) {
+          const reason = isLlmFailure(analysis) ? 'LLM failed' : 'depth=0 landing page';
+          log.info(`${reason} — attempting blind click fallback`);
           const clicked = await blindClickFallback(page, startUrl, waitAfterClick, log);
           if (clicked) {
             log.info('Blind click fallback succeeded — re-analyzing in next iteration');

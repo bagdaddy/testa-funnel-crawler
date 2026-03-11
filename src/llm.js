@@ -38,13 +38,18 @@ Important rules:
      For any numeric field, always use a realistic non-zero value appropriate for the context.
    - IMPORTANT: Include terms/conditions checkboxes, privacy policy agreements, consent toggles, and "I agree" buttons in formFields. These are often required before submit is enabled. Use type "click" for these — the crawler will click them. They may be buttons, divs, labels, or custom toggle elements, not just input checkboxes.
    - Include ALL required interactions in formFields in the correct order: fill inputs first, then click agreements/checkboxes, then the crawler will click submit.
-3. Navigation buttons include: "Get Started", "Next", "Continue", "Start", "Begin", "See Results", "Show Results", "Submit", "Proceed", "Take the Quiz", etc.
-4. End-of-funnel signals: pricing ($, €, £), "add to cart", "buy now", "checkout", product recommendations with prices, subscription plans.
+3. Navigation buttons include: "Get Started", "Next", "Continue", "Start", "Begin", "See Results", "Show Results", "Submit", "Proceed", "Take the Quiz", "Buy now", "Add to Cart", "Subscribe", "Sign Up", "Get Access", "Claim Offer", "Start Free Trial", etc. ANY button that advances the user toward checkout or registration is a navigation button.
+4. CRITICAL — The goal is to reach the DEEPEST possible end-of-user-journey page. Do NOT stop early.
+   - Pages that are NOT end-of-funnel (keep going!): pricing pages with buy/subscribe buttons, product pages with "add to cart", plan selection pages, feature comparison pages, landing pages with CTAs. If the page has ANY button that could lead further toward checkout/registration/payment, classify as "navigation" and click it.
+   - TRUE end-of-funnel (stop here): actual checkout/payment forms (credit card fields, Stripe/PayPal embeds), registration/account creation forms, order confirmation/"thank you" pages, pages on external payment domains (e.g. checkout.stripe.com), pages where there is genuinely NO further action to take.
+   - When in doubt, classify as "navigation" and keep advancing. It is MUCH better to go one page too far than to stop one page too early.
 5. If the page shows quiz choices that have NOT yet been selected and there is no "Continue"/"Next" button, classify as "quiz_choices". If a "Continue" or "Next" button is visible (suggesting a choice was already made), classify as "navigation" — the crawler will click Continue to advance.
 6. Only include elements that are actually visible and interactive in your response. Use the exact CSS selectors provided in the snapshot.
 7. For quiz choices, only include the actual answer options, not the question text or other UI elements.
 8. MULTI-SELECT pages ("select all that apply", ingredient pickers, preference selectors with many options) are NOT branching choices — all selections lead to the same next page. Classify these as "navigation". For navButtons, return the buttons to click IN ORDER: first a "Select all"/"Select everything" checkbox/button if available, then the "Continue"/"Next" button. IMPORTANT: if there is NO select-all option, you MUST still include at least one selectable option/checkbox BEFORE the Continue button — many pages disable Continue until at least one option is selected. Pick the first available option.
-9. Only classify as "quiz_choices" when each option leads to a DIFFERENT path through the funnel (e.g. "What's your gender?" Male/Female, "What's your goal?" Lose weight/Gain muscle). Typically these have 2-6 mutually exclusive options. Pages with 7+ selectable items are almost always multi-select preference pages, not branching choices.`;
+9. Only classify as "quiz_choices" when each option leads to a DIFFERENT path through the funnel (e.g. "What's your gender?" Male/Female, "What's your goal?" Lose weight/Gain muscle). Typically these have 2-6 mutually exclusive options. Pages with 7+ selectable items are almost always multi-select preference pages, not branching choices.
+10. IMPORTANT: When the current page IS the start URL (depth=0), it is the funnel entry point. Even if it looks like a product landing page or marketing homepage, if it has CTA buttons like "Get Started", "Buy now", "Start Quiz", "Try Now", "Take the Quiz", etc., classify it as "navigation" and return those CTAs as navButtons. The crawler MUST click through to enter the funnel. Do NOT classify the start URL as "other" if there are any clickable CTAs that could lead into a funnel flow.
+11. NEVER classify a page as "end_of_funnel" if it has buy/subscribe/sign-up/checkout buttons. Those buttons mean there is MORE funnel ahead. Only classify as "end_of_funnel" when you see actual payment fields (credit card inputs, Stripe/PayPal), registration forms that create an account, or confirmation/thank-you pages with no further actions.`;
 
 // ---------------------------------------------------------------------------
 // Tool Definition for Structured Output
@@ -137,12 +142,13 @@ let cacheMisses = 0;
 
 function buildCacheKey(snapshot) {
   const headings = (snapshot.headings || []).join('|');
+  const bodyPrefix = (snapshot.bodyText || '').slice(0, 300);
   const elementLabels = (snapshot.elements || [])
-    .filter((e) => e.aboveFold && e.text)
+    .filter((e) => e.text)
     .map((e) => e.text)
     .sort()
     .join('|');
-  return `${headings}::${elementLabels}`;
+  return `${headings}::${bodyPrefix}::${elementLabels}`;
 }
 
 export function getCacheStats() {

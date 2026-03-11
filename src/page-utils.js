@@ -184,41 +184,71 @@ export async function extractPageSnapshot(page) {
     const seen = new Set();
     const candidates = [];
 
+    function addCandidate(node) {
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (!isVisible(node)) return;
+
+      const tag = node.tagName.toLowerCase();
+      const text = getVisibleText(node);
+      const href = node.getAttribute('href') || null;
+      const type = node.getAttribute('type') || null;
+      const name = node.getAttribute('name') || null;
+      const placeholder = node.getAttribute('placeholder') || null;
+      const required = node.hasAttribute('required');
+
+      // Skip elements with no text and no useful attributes
+      if (!text && !placeholder && !name && tag !== 'input' && tag !== 'select' && tag !== 'textarea') {
+        return;
+      }
+
+      const aboveFold = isAboveFold(node);
+      candidates.push({
+        tag,
+        type,
+        text: text.slice(0, 100),
+        href,
+        name,
+        placeholder,
+        required,
+        selector: buildSelector(node),
+        aboveFold,
+        // Sort priority: above-fold with text first
+        _priority: (aboveFold ? 0 : 1000) + (text ? 0 : 500),
+      });
+    }
+
+    // Pass 1: Standard interactive selectors
     for (const sel of interactiveSelectors) {
       const nodes = document.querySelectorAll(sel);
       for (const node of nodes) {
-        if (seen.has(node)) continue;
-        seen.add(node);
-        if (!isVisible(node)) continue;
-
-        const tag = node.tagName.toLowerCase();
-        const text = getVisibleText(node);
-        const href = node.getAttribute('href') || null;
-        const type = node.getAttribute('type') || null;
-        const name = node.getAttribute('name') || null;
-        const placeholder = node.getAttribute('placeholder') || null;
-        const required = node.hasAttribute('required');
-
-        // Skip elements with no text and no useful attributes
-        if (!text && !placeholder && !name && tag !== 'input' && tag !== 'select' && tag !== 'textarea') {
-          continue;
-        }
-
-        const aboveFold = isAboveFold(node);
-        candidates.push({
-          tag,
-          type,
-          text: text.slice(0, 100),
-          href,
-          name,
-          placeholder,
-          required,
-          selector: buildSelector(node),
-          aboveFold,
-          // Sort priority: above-fold with text first
-          _priority: (aboveFold ? 0 : 1000) + (text ? 0 : 500),
-        });
+        addCandidate(node);
       }
+    }
+
+    // Pass 2: Cursor-pointer elements (catches Framer, Webflow, custom React components)
+    // Only scan above-fold to avoid pulling in hundreds of styled elements
+    const allElements = document.body.querySelectorAll('*');
+    for (const node of allElements) {
+      if (seen.has(node)) continue;
+      const style = window.getComputedStyle(node);
+      if (style.cursor !== 'pointer') continue;
+      if (!isVisible(node)) continue;
+      if (!isAboveFold(node)) continue;
+      const rect = node.getBoundingClientRect();
+      // Skip very large containers (likely wrappers, not buttons)
+      if (rect.height > 150 || rect.width > 350) continue;
+      const text = getVisibleText(node);
+      if (!text || text.length > 100) continue;
+      // Skip if a parent with the same text is already captured
+      let parentCaptured = false;
+      let parent = node.parentElement;
+      while (parent) {
+        if (seen.has(parent)) { parentCaptured = true; break; }
+        parent = parent.parentElement;
+      }
+      if (parentCaptured) continue;
+      addCandidate(node);
     }
 
     // Sort by priority (above-fold text-bearing elements first), cap at MAX
