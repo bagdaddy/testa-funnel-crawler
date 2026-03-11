@@ -58,6 +58,18 @@
       "description": "API key for Claude LLM analysis. Can also be set as ANTHROPIC_API_KEY env var.",
       "editor": "textfield",
       "isSecret": true
+    },
+    "webhookUrl": {
+      "title": "Webhook URL",
+      "type": "string",
+      "description": "URL to POST screenshot results to when the run finishes. Can also be set as WEBHOOK_URL env var.",
+      "editor": "textfield"
+    },
+    "runId": {
+      "title": "Run ID",
+      "type": "string",
+      "description": "Unique identifier echoed back in the webhook payload so the caller can correlate results. Auto-generated (UUID) if not provided. Can also be set as RUN_ID env var.",
+      "editor": "textfield"
     }
   }
 }

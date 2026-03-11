@@ -14,13 +14,21 @@ const POPUP_CLOSE_SELECTORS = [
   '[class*="closeButton"]',
   '[class*="cookie"] button',
   '[class*="banner"] button',
+  '[class*="consent"] button',
+  '[id*="cookie"] button',
+  '[id*="consent"] button',
+  'button[id*="accept"]',
+  'button[id*="reject"]',
+  '[class*="modal"] [class*="close"]',
+  '[class*="overlay"] [class*="close"]',
+  '[class*="privacy"] button',
 ];
 
 const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024; // 10 MB
 const INITIAL_JPEG_QUALITY = 85;
 const MIN_JPEG_QUALITY = 30;
 const QUALITY_STEP = 15;
-const MAX_ELEMENTS = 30;
+const MAX_ELEMENTS = 60;
 
 // ---------------------------------------------------------------------------
 // URL Validation
@@ -46,10 +54,26 @@ export function validateStartUrl(startUrl) {
 // ---------------------------------------------------------------------------
 
 export async function dismissPopups(page) {
+  // Strategy 1: Click visible accept/reject/close buttons by text
+  const acceptLabels = ['Accept All', 'Accept all', 'Accept Cookies', 'Accept cookies', 'Accept', 'Allow All', 'Allow all', 'I Accept', 'OK', 'Got it', 'Agree', 'Reject All', 'Reject all', 'Reject'];
+  for (const label of acceptLabels) {
+    try {
+      const btn = page.getByRole('button', { name: label, exact: true }).first();
+      if (await btn.isVisible({ timeout: 300 })) {
+        await btn.click({ timeout: 1000 });
+        await page.waitForTimeout(500);
+        break;
+      }
+    } catch {
+      // not found
+    }
+  }
+
+  // Strategy 2: Click common close button selectors
   for (const selector of POPUP_CLOSE_SELECTORS) {
     try {
       const el = page.locator(selector).first();
-      if (await el.isVisible({ timeout: 500 })) {
+      if (await el.isVisible({ timeout: 300 })) {
         await el.click({ timeout: 1000 });
         await page.waitForTimeout(300);
       }
@@ -57,6 +81,23 @@ export async function dismissPopups(page) {
       // popup element not present or not clickable
     }
   }
+
+  // Strategy 3: Force-remove known overlay containers that block interaction
+  // (e.g. OneTrust, CookieBot, etc. that persist even after accepting)
+  await page.evaluate(() => {
+    const overlaySelectors = [
+      '#onetrust-consent-sdk',
+      '#onetrust-banner-sdk',
+      '#CybotCookiebotDialog',
+      '[class*="cookie-consent"]',
+      '[class*="cookie-banner"]',
+      '[id*="gdpr"]',
+      '.cc-window',
+    ];
+    for (const sel of overlaySelectors) {
+      document.querySelectorAll(sel).forEach((el) => el.remove());
+    }
+  }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +106,7 @@ export async function dismissPopups(page) {
 
 export async function extractPageSnapshot(page) {
   return page.evaluate(() => {
-    const MAX = 30;
+    const MAX = 60;
 
     function getVisibleText(el) {
       return (el.innerText || el.textContent || '').trim();
@@ -100,6 +141,15 @@ export async function extractPageSnapshot(page) {
       return rect.top < window.innerHeight;
     }
 
+    function isVisible(node) {
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 || rect.height > 0;
+    }
+
     // Page metadata
     const title = document.title || '';
     const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'))
@@ -109,7 +159,7 @@ export async function extractPageSnapshot(page) {
 
     const bodyText = (document.body.innerText || '').slice(0, 1500);
 
-    // Interactive elements
+    // Collect ALL candidate interactive elements, then prioritize
     const interactiveSelectors = [
       'button',
       'a[href]',
@@ -118,30 +168,28 @@ export async function extractPageSnapshot(page) {
       'textarea',
       'label',
       '[role="button"]',
+      '[role="checkbox"]',
+      '[role="radio"]',
+      '[role="option"]',
       '[class*="btn"]',
       '[class*="option"]',
       '[class*="choice"]',
+      '[class*="chip"]',
+      '[class*="pill"]',
+      '[class*="tag"]',
+      '[class*="toggle"]',
+      '[onclick]',
     ];
 
     const seen = new Set();
-    const elements = [];
+    const candidates = [];
 
     for (const sel of interactiveSelectors) {
-      if (elements.length >= MAX) break;
       const nodes = document.querySelectorAll(sel);
-
       for (const node of nodes) {
-        if (elements.length >= MAX) break;
         if (seen.has(node)) continue;
         seen.add(node);
-
-        // Skip invisible elements
-        const style = window.getComputedStyle(node);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-          continue;
-        }
-        const rect = node.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) continue;
+        if (!isVisible(node)) continue;
 
         const tag = node.tagName.toLowerCase();
         const text = getVisibleText(node);
@@ -156,7 +204,8 @@ export async function extractPageSnapshot(page) {
           continue;
         }
 
-        elements.push({
+        const aboveFold = isAboveFold(node);
+        candidates.push({
           tag,
           type,
           text: text.slice(0, 100),
@@ -165,10 +214,16 @@ export async function extractPageSnapshot(page) {
           placeholder,
           required,
           selector: buildSelector(node),
-          aboveFold: isAboveFold(node),
+          aboveFold,
+          // Sort priority: above-fold with text first
+          _priority: (aboveFold ? 0 : 1000) + (text ? 0 : 500),
         });
       }
     }
+
+    // Sort by priority (above-fold text-bearing elements first), cap at MAX
+    candidates.sort((a, b) => a._priority - b._priority);
+    const elements = candidates.slice(0, MAX).map(({ _priority, ...el }) => el);
 
     // Form structures
     const forms = Array.from(document.querySelectorAll('form')).slice(0, 5).map((form) => {
@@ -207,23 +262,36 @@ export async function hashPageContent(page) {
 // Form Filling
 // ---------------------------------------------------------------------------
 
-export async function fillForm(page, fields) {
+export async function fillForm(page, fields, log) {
   for (const field of fields) {
+    const fieldType = (field.type || '').toLowerCase();
+    const label = field.value ? `${fieldType}="${field.value}"` : fieldType;
     try {
       const el = page.locator(field.selector).first();
-      const fieldType = (field.type || '').toLowerCase();
+      const visible = await el.isVisible({ timeout: 2000 }).catch(() => false);
 
-      if (fieldType === 'select' || field.tag === 'select') {
+      if (!visible) {
+        if (log) log.warning(`Form field not visible: [${label}] selector="${field.selector}"`);
+        continue;
+      }
+
+      if (fieldType === 'click') {
+        if (log) log.info(`Form: clicking element selector="${field.selector}"`);
+        await el.click({ timeout: 3000 });
+      } else if (fieldType === 'select' || field.tag === 'select') {
+        if (log) log.info(`Form: selecting "${field.value}" in selector="${field.selector}"`);
         await el.selectOption(field.value, { timeout: 3000 });
       } else if (fieldType === 'checkbox' || fieldType === 'radio') {
+        if (log) log.info(`Form: checking ${fieldType} selector="${field.selector}"`);
         await el.check({ timeout: 3000 });
       } else {
+        if (log) log.info(`Form: filling "${field.value}" in selector="${field.selector}"`);
         await el.fill(field.value || '', { timeout: 3000 });
       }
 
       await page.waitForTimeout(200);
-    } catch {
-      // Some fields may be optional or already filled
+    } catch (err) {
+      if (log) log.warning(`Form field FAILED [${label}] selector="${field.selector}": ${err.message}`);
     }
   }
 }
@@ -233,11 +301,13 @@ export async function fillForm(page, fields) {
 // ---------------------------------------------------------------------------
 
 export async function waitForSettle(page, timeoutMs = 3000) {
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {}),
-    page.waitForLoadState('networkidle', { timeout: timeoutMs }).catch(() => {}),
-    page.waitForTimeout(timeoutMs),
-  ]);
+  // Wait for network to go idle (critical for SPAs that fetch data after navigation)
+  await page.waitForLoadState('networkidle', { timeout: timeoutMs + 5000 }).catch(() => {});
+
+  // Also wait for any visible button/input/link to appear (content rendered)
+  await page.waitForSelector('button:visible, a:visible, input:visible, [role="button"]:visible', {
+    timeout: timeoutMs,
+  }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +315,7 @@ export async function waitForSettle(page, timeoutMs = 3000) {
 // ---------------------------------------------------------------------------
 
 export function fingerprintActions(actions) {
-  const key = actions.map((a) => `${a.type}::${a.label}::${a.selector || ''}`).join('|');
+  const key = actions.map((a) => `${a.type}::${a.label}`).join('|');
   return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
