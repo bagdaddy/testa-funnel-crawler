@@ -283,7 +283,15 @@ export async function extractPageSnapshot(page) {
 
 export async function hashPageContent(page) {
   const url = page.url();
-  const text = await page.evaluate(() => document.body.innerText || '');
+  const text = await page.evaluate(() => {
+    const raw = document.body.innerText || '';
+    // Strip dynamic content that changes between reads (timers, counters, etc.)
+    return raw
+      .replace(/\d{1,2}h\s*\d{1,2}m\s*\d{1,2}s/g, '')  // countdown timers
+      .replace(/\d{1,2}:\d{2}(:\d{2})?/g, '')            // time formats
+      .replace(/\d{1,2}\s*(hours?|mins?|minutes?|secs?|seconds?)\s*/gi, '') // written timers
+      .trim();
+  });
   const raw = `${url}||${text}`;
   return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
 }

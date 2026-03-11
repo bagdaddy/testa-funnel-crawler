@@ -591,10 +591,25 @@ try {
       const MAX_ITERATIONS = 10;
       const seenHashes = new Set();
       let screenshotted = false;
+      let sameUrlCount = 0;
+      let lastUrl = null;
 
       for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
         // Dismiss any popups that may have appeared
         await dismissPopups(page);
+
+        // Check for URL-based loops (same URL 3+ iterations = stuck)
+        const currentUrl = page.url();
+        if (currentUrl === lastUrl) {
+          sameUrlCount++;
+          if (sameUrlCount >= 3) {
+            log.info(`URL unchanged for ${sameUrlCount} iterations (${currentUrl}), stopping loop`);
+            break;
+          }
+        } else {
+          sameUrlCount = 1;
+          lastUrl = currentUrl;
+        }
 
         // Check for cycles
         const currentHash = await hashPageContent(page);
