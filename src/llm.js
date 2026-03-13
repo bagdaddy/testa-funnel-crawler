@@ -12,44 +12,131 @@ export function initLlmClient(apiKey) {
 }
 
 // ---------------------------------------------------------------------------
-// System Prompt
+// Focused Prompts (selected per-page by heuristic)
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are an expert at analyzing web pages that are part of ecommerce quiz funnels, lead generation forms, and product recommendation flows.
+const LANDING_PROMPT = `You analyze web pages to help a crawler screenshot every distinct page.
 
-Given a page snapshot (title, headings, body text, interactive elements, forms), classify the page and decide what actions the crawler should take.
+Your PRIMARY OBJECTIVE: identify all distinct navigable sections/products/categories on this page and return them as branch actions so the crawler can explore each one.
 
-Page types:
-- "quiz_choices": The page presents multiple options/choices for the user to pick from (e.g. "What's your skin type?" with options). The crawler should branch on each choice.
-- "form": The page has form fields that need filling (email, name, phone, etc.) before proceeding. The crawler should fill the form with realistic test data and submit.
-- "navigation": The page has a clear "continue" or "get started" button but no meaningful choices. The crawler should click it to advance.
-- "end_of_funnel": The page shows results, pricing, product recommendations, checkout, or a final offer. The crawler should screenshot and stop.
-- "other": The page doesn't fit any funnel pattern (e.g. a blog, about page, homepage with no funnel). The crawler should screenshot and stop.
+Action kinds:
+1. "fill" — Form field (text, select, checkbox, consent). Use fillType "click" for toggles/consent.
+2. "advance" — Single forward click (CTA, "Get Started", "Learn More"). Use when there is ONE clear forward path.
+3. "branch" — Multiple DISTINCT destinations worth separate exploration.
+   CRITICAL: For branch actions, strongly prefer selectors from the "links" section of the snapshot.
+   These have resolved absolute hrefs that enable reliable direct navigation.
+   If a link is not in the "links" section, you may still use its selector as a branch action.
+   Maximum 6 branches.
 
-Important rules:
-1. Quiz choices are ONLY options that represent different user preferences/answers. Do NOT treat navigation links, footer links, header menus, or social media buttons as quiz choices.
-2. For forms, be THOROUGH — include ALL interactions needed to submit successfully:
-   - Fill fields with realistic fake test data using REALISTIC non-zero values:
-     Height: "5" feet "8" inches, or "172" cm
-     Current weight: "180" lbs or "82" kg (NEVER use 0)
-     Desired/target weight: "150" lbs or "68" kg (must be LESS than current weight for weight-loss funnels)
-     Age: "28"
-     Email: "qa+1234@kilo.health", Name: "Jane Smith", Phone: "555-012-3456", Zip: "90210"
-     For any numeric field, always use a realistic non-zero value appropriate for the context.
-   - IMPORTANT: Include terms/conditions checkboxes, privacy policy agreements, consent toggles, and "I agree" buttons in formFields. These are often required before submit is enabled. Use type "click" for these — the crawler will click them. They may be buttons, divs, labels, or custom toggle elements, not just input checkboxes.
-   - Include ALL required interactions in formFields in the correct order: fill inputs first, then click agreements/checkboxes, then the crawler will click submit.
-3. Navigation buttons include: "Get Started", "Next", "Continue", "Start", "Begin", "See Results", "Show Results", "Submit", "Proceed", "Take the Quiz", "Buy now", "Add to Cart", "Subscribe", "Sign Up", "Get Access", "Claim Offer", "Start Free Trial", etc. ANY button that advances the user toward checkout or registration is a navigation button.
-4. CRITICAL — The goal is to reach the DEEPEST possible end-of-user-journey page. Do NOT stop early.
-   - Pages that are NOT end-of-funnel (keep going!): pricing pages with buy/subscribe buttons, product pages with "add to cart", plan selection pages, feature comparison pages, landing pages with CTAs. If the page has ANY button that could lead further toward checkout/registration/payment, classify as "navigation" and click it.
-   - TRUE end-of-funnel (stop here): actual checkout/payment forms (credit card fields, Stripe/PayPal embeds), registration/account creation forms, order confirmation/"thank you" pages, pages on external payment domains (e.g. checkout.stripe.com), pages where there is genuinely NO further action to take.
-   - When in doubt, classify as "navigation" and keep advancing. It is MUCH better to go one page too far than to stop one page too early.
-5. If the page shows quiz choices that have NOT yet been selected and there is no "Continue"/"Next" button, classify as "quiz_choices". If a "Continue" or "Next" button is visible (suggesting a choice was already made), classify as "navigation" — the crawler will click Continue to advance.
-6. Only include elements that are actually visible and interactive in your response. Use the exact CSS selectors provided in the snapshot.
-7. For quiz choices, only include the actual answer options, not the question text or other UI elements.
-8. MULTI-SELECT pages ("select all that apply", ingredient pickers, preference selectors with many options) are NOT branching choices — all selections lead to the same next page. Classify these as "navigation". For navButtons, return the buttons to click IN ORDER: first a "Select all"/"Select everything" checkbox/button if available, then the "Continue"/"Next" button. IMPORTANT: if there is NO select-all option, you MUST still include at least one selectable option/checkbox BEFORE the Continue button — many pages disable Continue until at least one option is selected. Pick the first available option.
-9. Only classify as "quiz_choices" when each option leads to a DIFFERENT path through the funnel (e.g. "What's your gender?" Male/Female, "What's your goal?" Lose weight/Gain muscle). Typically these have 2-6 mutually exclusive options. Pages with 7+ selectable items are almost always multi-select preference pages, not branching choices.
-10. IMPORTANT: When the current page IS the start URL (depth=0), it is the funnel entry point. Even if it looks like a product landing page or marketing homepage, if it has CTA buttons like "Get Started", "Buy now", "Start Quiz", "Try Now", "Take the Quiz", etc., classify it as "navigation" and return those CTAs as navButtons. The crawler MUST click through to enter the funnel. Do NOT classify the start URL as "other" if there are any clickable CTAs that could lead into a funnel flow.
-11. NEVER classify a page as "end_of_funnel" if it has buy/subscribe/sign-up/checkout buttons. Those buttons mean there is MORE funnel ahead. Only classify as "end_of_funnel" when you see actual payment fields (credit card inputs, Stripe/PayPal), registration forms that create an account, or confirmation/thank-you pages with no further actions.`;
+What to branch on:
+- Product category links ("Men", "Women", "Electronics", "Supplements")
+- Product entry points ("Buy Product A", "Shop Now", "Take the Quiz")
+- Distinct service/feature pages ("For Business", "For Personal")
+- Top-level navigation categories on e-commerce sites
+- "Register" / "Sign up" links (valuable to screenshot even if terminal)
+
+What to IGNORE (never branch, never advance):
+- Social media links, language selectors, login links (NOT register)
+- FAQ, blog, terms, privacy, help/support, footer links
+- Links to the same page (anchors, hashes)
+
+RULES:
+1. Use exact CSS selectors from the snapshot. NEVER use :contains(), :has-text(), or jQuery pseudo-selectors.
+2. If nothing meaningful to click → isTerminal=true, empty actions.
+3. Loading/spinner pages → pageType="loading", isTerminal=false, empty actions.
+4. Pages with "Buy Now"/"Subscribe"/"Add to Cart" are NOT terminal — advance or branch.
+5. Actual payment forms (credit card fields, Stripe embed) → isTerminal=true.
+6. Registration/login pages where the MAIN content is the auth form → isTerminal=true.
+   But if a login modal exists alongside product links, it is NOT terminal — use the product links.`;
+
+const FUNNEL_PROMPT = `You analyze web pages in online funnels. Your PRIMARY OBJECTIVE is to move FORWARD through the funnel as fast as possible, screenshotting every distinct page state.
+
+Action kinds (ordered by preference):
+1. "fill" — Form field to fill. Text inputs, dropdowns, checkboxes, consent toggles.
+   For consent/agreement elements, use fillType "click".
+   NOTE: Consent checkboxes are often styled as BUTTONS (not native inputs).
+
+2. "advance" — Click to move forward. THE DEFAULT. Use for:
+   - Quiz answers: pick the FIRST reasonable option and click it
+   - CTA buttons: Continue, Next, Get Started, Buy Now, Add to Cart, Subscribe
+   - When a page needs BOTH selecting an option AND clicking Continue/Next, return BOTH as separate advance actions (option first, then button).
+
+3. "branch" — Almost NEVER use in funnels. Only use if the page has genuinely different product paths (e.g., "Men's Plan" vs "Women's Plan" on a landing page within the funnel).
+
+NEVER branch on:
+- Quiz/survey answers (they lead to the same next question!)
+- Preference selections, goal selectors, body type pickers
+- Options that collect user data (age range, activity level)
+- Pricing plan buttons (just pick one and advance)
+
+Fill data:
+- Height: "5" feet "8" inches or "172" cm
+- Current weight: "180" lbs / "82" kg (NEVER 0)
+- Target weight: "150" lbs / "68" kg
+- Age: "28", Email: "qa+test@kilo.health", Name: "Jane Smith", Phone: "555-012-3456"
+- For any numeric field, use a realistic non-zero value
+
+RULES:
+1. Fill actions come first, then advance.
+2. Consent toggles / terms checkboxes → fill with fillType "click", BEFORE final advance.
+3. Use exact CSS selectors from the snapshot. NEVER use :contains(), :has-text(), or jQuery pseudo-selectors.
+4. Loading/spinner/progress pages ("calculating", "preparing", "analyzing", progress %) → pageType="loading", isTerminal=false, EMPTY actions. The crawler will wait.
+5. On funnel pages (quiz, form, checkout, results): IGNORE header/footer nav entirely.
+6. Terminal (isTerminal=true): order confirmation, thank-you, actual payment forms with card fields, dedicated registration/login pages.
+   Do NOT fill or submit registration or login forms.
+   Pages with "Buy Now"/"Subscribe"/"Add to Cart" are NOT terminal — advance.
+7. If nothing meaningful to click and page shows final content → isTerminal=true, empty actions.`;
+
+const CHECKOUT_PROMPT = `You analyze checkout and payment pages.
+
+RULES:
+1. If the page has credit card fields, Stripe/PayPal embed, or a payment form → isTerminal=true, empty actions.
+2. If the page has a "Buy Now"/"Subscribe"/"Complete Purchase" button but NO payment fields yet → it is NOT terminal. Use advance to click the button.
+3. Order confirmation / thank-you pages → isTerminal=true, empty actions.
+4. Do NOT fill payment details (credit card, CVV, expiry).
+5. Use exact CSS selectors from the snapshot. NEVER use :contains(), :has-text(), or jQuery pseudo-selectors.`;
+
+// ---------------------------------------------------------------------------
+// Prompt Selection Heuristic
+// ---------------------------------------------------------------------------
+
+/**
+ * Select the most appropriate prompt based on page snapshot content.
+ * No extra LLM call — pure heuristic.
+ */
+export function selectPrompt(snapshot) {
+  const text = (snapshot.bodyText || '').toLowerCase();
+
+  // Checkout detection: payment-related keywords
+  if (/credit card|card number|cvv|cvc|stripe|paypal|payment method|billing address|expiry date|card details/i.test(text)) {
+    return { prompt: CHECKOUT_PROMPT, promptName: 'checkout' };
+  }
+
+  // Funnel detection: forms with 2+ fields, or quiz/survey indicators
+  const formFieldCount = (snapshot.forms || []).reduce((n, f) => n + (f.fields || []).length, 0);
+  if (formFieldCount >= 2) {
+    return { prompt: FUNNEL_PROMPT, promptName: 'funnel' };
+  }
+
+  // Quiz detection via element patterns (radio buttons, option chips)
+  const elements = snapshot.elements || [];
+  const radioCount = elements.filter((e) => e.type === 'radio').length;
+  const optionLikeCount = elements.filter((e) =>
+    e.tag === 'button' && e.text && e.text.length < 50 && !e.href
+  ).length;
+  if (radioCount >= 3 || (optionLikeCount >= 3 && optionLikeCount <= 8)) {
+    return { prompt: FUNNEL_PROMPT, promptName: 'funnel' };
+  }
+
+  // Landing detection: 3+ links available
+  const linkCount = (snapshot.links || []).length;
+  if (linkCount >= 3) {
+    return { prompt: LANDING_PROMPT, promptName: 'landing' };
+  }
+
+  // Default to funnel (safe: advance-first, fill forms)
+  return { prompt: FUNNEL_PROMPT, promptName: 'funnel' };
+}
 
 // ---------------------------------------------------------------------------
 // Tool Definition for Structured Output
@@ -60,82 +147,68 @@ const ANALYZE_TOOL = {
   description: 'Report the analysis of the current page state',
   input_schema: {
     type: 'object',
-    required: ['pageType', 'reasoning', 'isEndOfFunnel'],
+    required: ['pageType', 'actions', 'isTerminal', 'reasoning'],
     properties: {
       pageType: {
         type: 'string',
-        enum: ['quiz_choices', 'form', 'navigation', 'end_of_funnel', 'other'],
-        description: 'Classification of the current page',
+        enum: ['quiz', 'form', 'landing', 'product_listing', 'product', 'checkout', 'results', 'loading', 'other'],
+        description: 'What type of page this is.',
+      },
+      actions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['kind', 'selector', 'label'],
+          properties: {
+            kind: {
+              type: 'string',
+              enum: ['branch', 'advance', 'fill'],
+              description: 'Action type: branch (enqueue each as separate path), advance (click to move forward), fill (fill form field)',
+            },
+            selector: {
+              type: 'string',
+              description: 'CSS selector for the element',
+            },
+            label: {
+              type: 'string',
+              description: 'Visible text or description of the element',
+            },
+            value: {
+              type: 'string',
+              description: 'Value to fill in (for fill actions with fillType text/email/select)',
+            },
+            fillType: {
+              type: 'string',
+              enum: ['text', 'email', 'select', 'checkbox', 'radio', 'click'],
+              description: 'How to interact with the element (only for fill actions)',
+            },
+          },
+        },
+        description: 'Ordered list of actions for the crawler to execute',
+      },
+      isTerminal: {
+        type: 'boolean',
+        description: 'Whether this is a terminal page (payment form, confirmation, thank you). No more crawling needed.',
       },
       reasoning: {
         type: 'string',
-        description: 'Brief explanation of why this page type was chosen',
-      },
-      isEndOfFunnel: {
-        type: 'boolean',
-        description: 'Whether this is the final page in the funnel',
-      },
-      quizChoices: {
-        type: 'array',
-        items: {
-          type: 'object',
-          required: ['selector', 'label'],
-          properties: {
-            selector: { type: 'string', description: 'CSS selector for the choice element' },
-            label: { type: 'string', description: 'Visible text of the choice' },
-          },
-        },
-        description: 'Quiz choice options to branch on (only for quiz_choices type)',
-      },
-      formFields: {
-        type: 'array',
-        items: {
-          type: 'object',
-          required: ['selector', 'type'],
-          properties: {
-            selector: { type: 'string', description: 'CSS selector for the form field or clickable element' },
-            value: { type: 'string', description: 'Value to fill in (required for text/email/select fields, omit for click/checkbox/radio)' },
-            type: { type: 'string', description: 'Field type: "text", "email", "select", "checkbox", "radio", or "click". Use "click" for terms/consent/agreement buttons, toggles, and any non-input element that must be clicked before submit.' },
-          },
-        },
-        description: 'ALL form interactions needed before submit, in order. Include text inputs, selects, AND clickable elements like terms/privacy checkboxes, consent toggles, agreement buttons.',
-      },
-      navButtons: {
-        type: 'array',
-        items: {
-          type: 'object',
-          required: ['selector', 'label'],
-          properties: {
-            selector: { type: 'string', description: 'CSS selector for the navigation button' },
-            label: { type: 'string', description: 'Visible text of the button' },
-          },
-        },
-        description: 'Navigation buttons to click (only for navigation type)',
-      },
-      submitSelector: {
-        type: ['string', 'null'],
-        description: 'CSS selector for the form submit button (only for form type)',
+        description: 'Brief explanation of the page and chosen actions',
       },
     },
   },
 };
 
 // ---------------------------------------------------------------------------
-// Analyze Page (with caching)
+// Analysis Cache
 // ---------------------------------------------------------------------------
 
 const EMPTY_RESULT = {
   pageType: 'other',
-  reasoning: 'LLM call failed — fallback to other',
-  isEndOfFunnel: false,
-  quizChoices: [],
-  formFields: [],
-  navButtons: [],
-  submitSelector: null,
+  actions: [],
+  isTerminal: false,
+  reasoning: 'LLM call failed',
 };
 
-// Cache LLM responses keyed by page headings + element labels
-// (same question page = same analysis, regardless of URL hash)
 const analysisCache = new Map();
 let cacheHits = 0;
 let cacheMisses = 0;
@@ -160,117 +233,79 @@ export function getCacheStats() {
 }
 
 // ---------------------------------------------------------------------------
-// Screenshot Worthiness Check
+// Analyze Page
 // ---------------------------------------------------------------------------
 
-const WORTHINESS_SYSTEM_PROMPT =
-  'You decide whether a web page is useful funnel content worth screenshotting. ' +
-  'Useful: quiz questions, form results, pricing, product recommendations, checkout, results pages, landing page offers. ' +
-  'Not useful: terms & conditions, privacy policy, about us, blog posts, cookie policy, generic info pages, contact pages, careers, press, legal notices.';
-
-const WORTHINESS_TOOL = {
-  name: 'judge_screenshot',
-  description: 'Decide if this page is worth screenshotting',
-  input_schema: {
-    type: 'object',
-    required: ['worthy'],
-    properties: {
-      worthy: {
-        type: 'boolean',
-        description: 'true if the page contains useful funnel content worth capturing, false if it is junk',
-      },
-    },
-  },
-};
-
-/**
- * Lightweight LLM check to decide if a page is worth screenshotting.
- * Fail-open: returns true on any error so we never lose screenshots due to API issues.
- */
-export async function isWorthScreenshot(title, url, bodySnippet) {
-  if (!client) return true; // no client → fail-open
-
-  const userMessage = `Page title: ${title}\nURL: ${url}\nBody (first 500 chars): ${bodySnippet.slice(0, 500)}`;
-
-  try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 64,
-      system: WORTHINESS_SYSTEM_PROMPT,
-      tools: [WORTHINESS_TOOL],
-      tool_choice: { type: 'tool', name: 'judge_screenshot' },
-      messages: [{ role: 'user', content: userMessage }],
-    });
-
-    const toolBlock = response.content.find((block) => block.type === 'tool_use');
-    if (!toolBlock) return true; // fail-open
-    return toolBlock.input.worthy !== false; // fail-open: default true unless explicitly false
-  } catch (err) {
-    console.warn(`Screenshot worthiness check failed (fail-open): ${err.message}`);
-    return true; // fail-open on any error
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Analyze Page (with caching)
-// ---------------------------------------------------------------------------
-
-export async function analyzePage(snapshot, currentUrl, startUrl, depth, maxDepth) {
+export async function analyzePage(snapshot, currentUrl, depth, maxDepth, { skipCache = false, actionContext = '' } = {}) {
   if (!client) {
     throw new Error('LLM client not initialized. Call initLlmClient() first.');
   }
 
-  // 1. Try exact content cache (same headings + labels = same page)
+  // 1. Try exact content cache
   const cacheKey = buildCacheKey(snapshot);
-  if (analysisCache.has(cacheKey)) {
+  if (!skipCache && analysisCache.has(cacheKey)) {
     cacheHits++;
     const cached = analysisCache.get(cacheKey);
     return { ...cached, reasoning: `[cached] ${cached.reasoning}` };
   }
   cacheMisses++;
 
-  // 2. Fall back to LLM call
-  const userMessage = `Analyze this page and decide what the crawler should do.
+  // 2. Select prompt based on page content
+  const { prompt: systemPrompt, promptName } = selectPrompt(snapshot);
+
+  const contextPrefix = actionContext
+    ? `IMPORTANT CONTEXT: ${actionContext}\n\n`
+    : '';
+  const userMessage = `${contextPrefix}Analyze this page and decide what the crawler should do.
 
 Current URL: ${currentUrl}
-Start URL: ${startUrl}
 Current depth: ${depth} / ${maxDepth}
 
 Page snapshot:
-${JSON.stringify(snapshot, null, 2)}`;
+${JSON.stringify(snapshot)}`;
 
-  try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      tools: [ANALYZE_TOOL],
-      tool_choice: { type: 'tool', name: 'analyze_page' },
-      messages: [{ role: 'user', content: userMessage }],
-    });
+  const MAX_RETRIES = 5;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: systemPrompt,
+        tools: [ANALYZE_TOOL],
+        tool_choice: { type: 'tool', name: 'analyze_page' },
+        messages: [{ role: 'user', content: userMessage }],
+      });
 
-    // Extract tool_use result
-    const toolBlock = response.content.find((block) => block.type === 'tool_use');
-    if (!toolBlock) {
-      return { ...EMPTY_RESULT, reasoning: 'No tool_use block in LLM response' };
+      const toolBlock = response.content.find((block) => block.type === 'tool_use');
+      if (!toolBlock) {
+        return { ...EMPTY_RESULT, reasoning: 'No tool_use block in LLM response' };
+      }
+
+      const result = toolBlock.input;
+      const analysis = {
+        pageType: result.pageType || 'other',
+        actions: result.actions || [],
+        isTerminal: result.isTerminal ?? false,
+        reasoning: `[${promptName}] ${result.reasoning || ''}`,
+      };
+
+      if (!skipCache) {
+        analysisCache.set(cacheKey, analysis);
+      }
+
+      return analysis;
+    } catch (err) {
+      const status = err?.status || err?.error?.status;
+      if ((status === 429 || status === 529) && attempt < MAX_RETRIES) {
+        const delay = Math.min(60_000, Math.pow(2, attempt + 2) * 1000);
+        console.log(`Rate limited (${status}), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      return { ...EMPTY_RESULT, reasoning: `LLM error: ${err.message}` };
     }
-
-    const result = toolBlock.input;
-    const analysis = {
-      pageType: result.pageType || 'other',
-      reasoning: result.reasoning || '',
-      isEndOfFunnel: result.isEndOfFunnel ?? false,
-      quizChoices: result.quizChoices || [],
-      formFields: result.formFields || [],
-      navButtons: result.navButtons || [],
-      submitSelector: result.submitSelector || null,
-    };
-
-    // Cache the exact result
-    analysisCache.set(cacheKey, analysis);
-
-    return analysis;
-  } catch (err) {
-    return { ...EMPTY_RESULT, reasoning: `LLM error: ${err.message}` };
   }
+
+  // Safety net: all retries exhausted without return
+  return { ...EMPTY_RESULT, reasoning: 'All retries exhausted' };
 }

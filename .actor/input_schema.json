@@ -1,6 +1,6 @@
 {
-  "title": "Quiz Funnel Screenshot Crawler",
-  "description": "Crawls ecommerce quiz funnels by clicking through all options, screenshotting every step, and mapping all possible paths.",
+  "title": "Web Funnel Screenshot Crawler",
+  "description": "Crawls web funnels (quizzes, signups, ecommerce, lead gen) by clicking through all options, screenshotting every step, and mapping all possible paths.",
   "type": "object",
   "schemaVersion": 1,
   "required": ["startUrl"],
@@ -8,7 +8,7 @@
     "startUrl": {
       "title": "Start URL",
       "type": "string",
-      "description": "The first page of the quiz funnel",
+      "description": "The first page of the funnel to crawl",
       "editor": "textfield",
       "prefill": "https://example.com/quiz"
     },

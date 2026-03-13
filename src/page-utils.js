@@ -28,7 +28,7 @@ const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024; // 10 MB
 const INITIAL_JPEG_QUALITY = 85;
 const MIN_JPEG_QUALITY = 30;
 const QUALITY_STEP = 15;
-const MAX_ELEMENTS = 60;
+const MAX_ELEMENTS = 40;
 
 // ---------------------------------------------------------------------------
 // URL Validation
@@ -82,8 +82,12 @@ export async function dismissPopups(page) {
     }
   }
 
-  // Strategy 3: Force-remove known overlay containers that block interaction
-  // (e.g. OneTrust, CookieBot, etc. that persist even after accepting)
+  // Strategy 3: Press Escape to dismiss modal dialogs
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(300);
+
+  // Strategy 4: Force-remove known overlay containers that block interaction
+  // (e.g. OneTrust, CookieBot, login modals, etc.)
   await page.evaluate(() => {
     const overlaySelectors = [
       '#onetrust-consent-sdk',
@@ -93,10 +97,24 @@ export async function dismissPopups(page) {
       '[class*="cookie-banner"]',
       '[id*="gdpr"]',
       '.cc-window',
+      // Login/auth modals (common patterns)
+      '[class*="modal"][class*="login"]',
+      '[class*="modal"][class*="auth"]',
+      '[class*="modal"][class*="register"]',
     ];
     for (const sel of overlaySelectors) {
       document.querySelectorAll(sel).forEach((el) => el.remove());
     }
+
+    // Also remove any full-screen overlay divs that block pointer events
+    // (common pattern: fixed/absolute positioned divs with high z-index)
+    document.querySelectorAll('[class*="overlay"], [class*="backdrop"]').forEach((el) => {
+      const style = window.getComputedStyle(el);
+      if ((style.position === 'fixed' || style.position === 'absolute') &&
+          parseInt(style.zIndex || '0') > 100) {
+        el.remove();
+      }
+    });
   }).catch(() => {});
 }
 
@@ -106,7 +124,7 @@ export async function dismissPopups(page) {
 
 export async function extractPageSnapshot(page) {
   return page.evaluate(() => {
-    const MAX = 60;
+    const MAX = 40;
 
     function getVisibleText(el) {
       return (el.innerText || el.textContent || '').trim();
@@ -119,10 +137,19 @@ export async function extractPageSnapshot(page) {
       const dataTestId = el.getAttribute('data-testid') || el.getAttribute('data-test');
       if (dataTestId) return `[data-testid="${CSS.escape(dataTestId)}"]`;
 
-      // Build nth-of-type chain
+      // For <a> tags with meaningful href, use href attribute for precision
+      if (el.tagName === 'A' && el.getAttribute('href')) {
+        const href = el.getAttribute('href');
+        if (href && !href.startsWith('mailto:') && !href.startsWith('tel:') && href !== '#') {
+          const selector = `a[href="${CSS.escape(href)}"]`;
+          if (document.querySelectorAll(selector).length === 1) return selector;
+        }
+      }
+
+      // Build nth-of-type chain with uniqueness verification
       const parts = [];
       let current = el;
-      while (current && current !== document.body && parts.length < 4) {
+      while (current && current !== document.body && parts.length < 8) {
         const parent = current.parentElement;
         if (!parent) break;
         const tag = current.tagName.toLowerCase();
@@ -131,6 +158,13 @@ export async function extractPageSnapshot(page) {
         );
         const idx = siblings.indexOf(current) + 1;
         parts.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
+
+        // Check if current selector is already unique
+        const candidate = parts.join(' > ');
+        if (parts.length >= 3 && document.querySelectorAll(candidate).length === 1) {
+          return candidate;
+        }
+
         current = parent;
       }
       return parts.join(' > ');
@@ -157,7 +191,7 @@ export async function extractPageSnapshot(page) {
       .filter(Boolean)
       .slice(0, 10);
 
-    const bodyText = (document.body.innerText || '').slice(0, 1500);
+    const bodyText = (document.body.innerText || '').slice(0, 800);
 
     // Collect ALL candidate interactive elements, then prioritize
     const interactiveSelectors = [
@@ -188,6 +222,8 @@ export async function extractPageSnapshot(page) {
       if (seen.has(node)) return;
       seen.add(node);
       if (!isVisible(node)) return;
+      // Skip aria-hidden elements (custom UI hides native inputs behind styled wrappers)
+      if (node.getAttribute('aria-hidden') === 'true') return;
 
       const tag = node.tagName.toLowerCase();
       const text = getVisibleText(node);
@@ -257,14 +293,17 @@ export async function extractPageSnapshot(page) {
 
     // Form structures
     const forms = Array.from(document.querySelectorAll('form')).slice(0, 5).map((form) => {
-      const formFields = Array.from(form.querySelectorAll('input, select, textarea')).slice(0, 10).map((field) => ({
-        tag: field.tagName.toLowerCase(),
-        type: field.getAttribute('type') || null,
-        name: field.getAttribute('name') || null,
-        placeholder: field.getAttribute('placeholder') || null,
-        required: field.hasAttribute('required'),
-        selector: buildSelector(field),
-      }));
+      const formFields = Array.from(form.querySelectorAll('input, select, textarea'))
+        .filter((field) => field.getAttribute('aria-hidden') !== 'true')
+        .slice(0, 10)
+        .map((field) => ({
+          tag: field.tagName.toLowerCase(),
+          type: field.getAttribute('type') || null,
+          name: field.getAttribute('name') || null,
+          placeholder: field.getAttribute('placeholder') || null,
+          required: field.hasAttribute('required'),
+          selector: buildSelector(field),
+        }));
       const submitBtn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
       return {
         selector: buildSelector(form),
@@ -273,8 +312,118 @@ export async function extractPageSnapshot(page) {
       };
     });
 
-    return { title, headings, bodyText, elements, forms };
+    // Collect same-origin <a> tags as explicit link targets for the LLM
+    const currentOrigin = window.location.origin;
+    const seenHrefs = new Set();
+    const links = [];
+    const allLinks = document.querySelectorAll('a[href]');
+    for (const a of allLinks) {
+      if (links.length >= 15) break;
+      try {
+        const href = new URL(a.href, window.location.href).href;
+        // Same-origin only, skip anchors/mailto/tel/javascript
+        if (!href.startsWith(currentOrigin)) continue;
+        if (href === window.location.href) continue;
+        const pathname = new URL(href).pathname;
+        if (pathname === '/' && window.location.pathname === '/') continue;
+        if (href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) continue;
+        if (seenHrefs.has(href)) continue;
+        seenHrefs.add(href);
+        const text = getVisibleText(a);
+        if (!text || text.length > 100) continue;
+        if (!isVisible(a)) continue;
+        links.push({
+          href,
+          text: text.slice(0, 80),
+          selector: buildSelector(a),
+          aboveFold: isAboveFold(a),
+        });
+      } catch { /* invalid URL */ }
+    }
+
+    return { title, headings, bodyText, elements, forms, links };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Trigger Lazy Content & Animations
+// ---------------------------------------------------------------------------
+
+/**
+ * Scroll through the page to trigger IntersectionObserver-based animations
+ * and lazy-loaded content, then scroll back to top.
+ * Call once before the first extractPageSnapshot() in the analysis loop.
+ */
+export async function triggerAnimations(page) {
+  await page.evaluate(async () => {
+    const scrollHeight = document.body.scrollHeight;
+    const viewportHeight = window.innerHeight;
+    const step = Math.floor(viewportHeight * 0.7);
+
+    for (let y = 0; y < scrollHeight; y += step) {
+      window.scrollTo(0, y);
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    // Scroll back to top
+    window.scrollTo(0, 0);
+  });
+  await page.waitForTimeout(300);
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot Diff (structural change detection)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare two page snapshots structurally.
+ * Returns { structureChanged, summary } where summary is human-readable.
+ * Used after advance clicks to distinguish real page transitions from
+ * dynamic content updates (lottery numbers, timers, ads).
+ */
+export function snapshotDiff(before, after) {
+  const diffs = [];
+
+  // Compare headings
+  const headingsBefore = (before.headings || []).join('|');
+  const headingsAfter = (after.headings || []).join('|');
+  if (headingsBefore !== headingsAfter) {
+    diffs.push('headings changed');
+  }
+
+  // Compare element labels (sorted for order-independence)
+  const labelsBefore = (before.elements || []).map((e) => e.text).filter(Boolean).sort().join('|');
+  const labelsAfter = (after.elements || []).map((e) => e.text).filter(Boolean).sort().join('|');
+  if (labelsBefore !== labelsAfter) {
+    const countBefore = (before.elements || []).length;
+    const countAfter = (after.elements || []).length;
+    if (countBefore !== countAfter) {
+      diffs.push(`element count ${countBefore} → ${countAfter}`);
+    } else {
+      diffs.push('element labels changed');
+    }
+  }
+
+  // Compare form field count
+  const formFieldsBefore = (before.forms || []).reduce((n, f) => n + (f.fields || []).length, 0);
+  const formFieldsAfter = (after.forms || []).reduce((n, f) => n + (f.fields || []).length, 0);
+  if (formFieldsBefore !== formFieldsAfter) {
+    diffs.push(`form fields ${formFieldsBefore} → ${formFieldsAfter}`);
+  }
+
+  // Compare links (if present)
+  const linksBefore = (before.links || []).map((l) => l.href).sort().join('|');
+  const linksAfter = (after.links || []).map((l) => l.href).sort().join('|');
+  if (linksBefore !== linksAfter) {
+    diffs.push('links changed');
+  }
+
+  const structureChanged = diffs.length > 0;
+  const summary = structureChanged
+    ? diffs.join(', ')
+    : 'same page structure';
+
+  return { structureChanged, summary };
 }
 
 // ---------------------------------------------------------------------------
@@ -283,15 +432,7 @@ export async function extractPageSnapshot(page) {
 
 export async function hashPageContent(page) {
   const url = page.url();
-  const text = await page.evaluate(() => {
-    const raw = document.body.innerText || '';
-    // Strip dynamic content that changes between reads (timers, counters, etc.)
-    return raw
-      .replace(/\d{1,2}h\s*\d{1,2}m\s*\d{1,2}s/g, '')  // countdown timers
-      .replace(/\d{1,2}:\d{2}(:\d{2})?/g, '')            // time formats
-      .replace(/\d{1,2}\s*(hours?|mins?|minutes?|secs?|seconds?)\s*/gi, '') // written timers
-      .trim();
-  });
+  const text = await page.evaluate(() => (document.body.innerText || '').trim());
   const raw = `${url}||${text}`;
   return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
 }
@@ -358,30 +499,12 @@ export function fingerprintActions(actions) {
 }
 
 /**
- * Scroll through the entire page to trigger IntersectionObserver-based
- * animations, lazy-loaded images, and scroll-reveal effects (Framer,
- * Webflow, AOS, etc.), then force all CSS animations/transitions to
- * their final state so the full-page screenshot captures everything.
+ * Prepare page for a clean full-page screenshot.
+ * Only injects CSS to freeze animations — does NOT scroll (scrolling
+ * triggers IntersectionObservers that can advance quiz/funnel state).
  */
 async function prepareForScreenshot(page) {
-  // 1. Scroll incrementally through the page to trigger observers
-  await page.evaluate(async () => {
-    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-    const step = Math.max(200, Math.floor(window.innerHeight * 0.7));
-    const maxScroll = document.body.scrollHeight;
-    for (let y = 0; y < maxScroll; y += step) {
-      window.scrollTo(0, y);
-      await delay(100);
-    }
-    // Scroll to very bottom to trigger any remaining observers
-    window.scrollTo(0, maxScroll);
-    await delay(200);
-    // Scroll back to top for a clean screenshot
-    window.scrollTo(0, 0);
-    await delay(100);
-  });
-
-  // 2. Force-finish all CSS animations/transitions
+  // Force-finish all CSS animations/transitions so hidden content appears
   await page.addStyleTag({
     content: `
       *, *::before, *::after {
@@ -394,7 +517,7 @@ async function prepareForScreenshot(page) {
     `,
   });
 
-  // 3. Force visibility on common animation-hidden elements
+  // Force visibility on elements hidden by animation initial state
   await page.evaluate(() => {
     const els = document.querySelectorAll('[style*="opacity: 0"], [style*="opacity:0"]');
     for (const el of els) {
@@ -402,16 +525,28 @@ async function prepareForScreenshot(page) {
     }
   });
 
-  // Let the forced styles take effect
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(200);
 }
 
-export async function takeScreenshot(page, kvStore, depth, actions) {
+export async function takeScreenshot(page, kvStore, depth, actions, { seq = 0 } = {}) {
   await prepareForScreenshot(page);
 
-  const timestamp = Date.now();
-  const pathHash = fingerprintActions(actions);
-  const key = `screenshot_depth${depth}_${pathHash}_${timestamp}`;
+  const seqStr = String(seq).padStart(3, '0');
+
+  // Include sanitized URL path + query in the screenshot key
+  let urlSlug = '';
+  try {
+    const parsed = new URL(page.url());
+    const raw = (parsed.pathname + parsed.search).replace(/^\//, '');
+    urlSlug = raw
+      .replace(/[^a-zA-Z0-9_\-]/g, '_')  // sanitize for KV store key
+      .replace(/_+/g, '_')                 // collapse multiple underscores
+      .replace(/^_|_$/g, '')               // trim leading/trailing underscores
+      .slice(0, 80);                       // cap length
+    if (urlSlug) urlSlug = `_${urlSlug}`;
+  } catch { /* ignore URL parse errors */ }
+
+  const key = `${seqStr}_depth${depth}${urlSlug}`;
 
   let quality = INITIAL_JPEG_QUALITY;
   let buffer = await page.screenshot({ fullPage: true, type: 'jpeg', quality });
