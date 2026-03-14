@@ -65,6 +65,13 @@
       "description": "URL to POST screenshot results to when the run finishes. Can also be set as WEBHOOK_URL env var.",
       "editor": "textfield"
     },
+    "webhookSecret": {
+      "title": "Webhook Secret",
+      "type": "string",
+      "description": "Secret sent as X-Webhook-Secret header with the webhook POST. Can also be set as WEBHOOK_SECRET env var.",
+      "editor": "textfield",
+      "isSecret": true
+    },
     "runId": {
       "title": "Run ID",
       "type": "string",

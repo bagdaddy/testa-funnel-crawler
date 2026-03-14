@@ -562,11 +562,12 @@ try {
     viewportHeight = 1080,
     anthropicApiKey,
     webhookUrl: inputWebhookUrl,
+    webhookSecret: inputWebhookSecret,
     runId: inputRunId,
   } = input;
 
   const webhookUrl = inputWebhookUrl || process.env.WEBHOOK_URL;
-  const webhookSecret = process.env.WEBHOOK_SECRET;
+  const webhookSecret = inputWebhookSecret || process.env.WEBHOOK_SECRET;
   const runId = inputRunId || process.env.RUN_ID || randomUUID();
 
   const apiKey = anthropicApiKey || process.env.ANTHROPIC_API_KEY;
@@ -748,9 +749,11 @@ try {
         count: collectedScreenshots.length,
         timestamp: new Date().toISOString(),
       };
+      const headers = { 'Content-Type': 'application/json' };
+      if (webhookSecret) headers['X-Webhook-Secret'] = webhookSecret;
       const res = await fetch(webhookUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': webhookSecret },
+        headers,
         body: JSON.stringify(payload),
       });
       console.log(`Webhook POST to ${webhookUrl}: ${res.status} ${res.statusText} (${collectedScreenshots.length} screenshots)`);
