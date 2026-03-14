@@ -3,7 +3,6 @@
   "name": "web-funnel-screenshot-crawler",
   "version": "1.0",
   "buildTag": "latest",
-  "environmentVariables": {},
   "dockerfile": "../Dockerfile",
   "input": "./input_schema.json",
   "defaultRunOptions": {
