@@ -566,6 +566,7 @@ try {
   } = input;
 
   const webhookUrl = inputWebhookUrl || process.env.WEBHOOK_URL;
+  const webhookSecret = process.env.WEBHOOK_SECRET;
   const runId = inputRunId || process.env.RUN_ID || randomUUID();
 
   const apiKey = anthropicApiKey || process.env.ANTHROPIC_API_KEY;
@@ -749,7 +750,7 @@ try {
       };
       const res = await fetch(webhookUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': webhookSecret },
         body: JSON.stringify(payload),
       });
       console.log(`Webhook POST to ${webhookUrl}: ${res.status} ${res.statusText} (${collectedScreenshots.length} screenshots)`);
